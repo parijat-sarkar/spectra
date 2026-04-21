@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Spectra results — {{ meta.gene_symbol or meta.ensembl_id }}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+         margin: 1.4em; color: #222; }
+  h1 { margin-bottom: 0.2em; }
+  .meta { color: #666; font-size: 0.95em; margin-bottom: 1em; }
+  .meta span { margin-right: 1.4em; }
+  a.btn { display: inline-block; background: #2d7; color: white; padding: 0.5em 1em;
+          border-radius: 4px; text-decoration: none; margin-right: 0.6em; margin-bottom: 1em; }
+  a.btn.gray { background: #777; }
+  a.btn:hover { background: #1c6; }
+  .notice { background: #ffe; border-left: 4px solid #cc9; padding: 0.6em 1em; margin-bottom: 1em; }
+  table { border-collapse: collapse; font-size: 0.78em; font-family: "SF Mono", Consolas, monospace; }
+  th, td { border: 1px solid #ddd; padding: 0.3em 0.55em; vertical-align: top; white-space: nowrap; }
+  th { background: #eef; position: sticky; top: 0; z-index: 2; }
+  /* let long pipe-separated cells wrap */
+  td.wrap-cell { white-space: normal; max-width: 32em; word-break: break-word; }
+  tr:nth-child(even) { background: #fafafa; }
+  .filter { margin-bottom: 0.6em; }
+  .filter input { padding: 0.3em 0.5em; font-size: 0.95em; width: 25em; }
+  .wrap { overflow-x: auto; max-height: 70vh; }
+</style>
+</head>
+<body>
+<h1>Spectra results</h1>
+<div class="meta">
+  <span><b>Input:</b> {{ form.ensembl_id }}</span>
+  <span><b>Gene:</b> {{ meta.gene_symbol or '—' }} ({{ meta.gene_id or '—' }})</span>
+  <span><b>Chrom:</b> {{ meta.chromosome }} ({{ meta.strand }})</span>
+  <span><b>Assembly:</b> {{ meta.assembly }}</span>
+  <span><b>Editor:</b> {{ form.editor }} / PAM {{ form.pam }}</span>
+  <span><b>Window:</b> {{ form.window }}</span>
+  <span><b>Rows:</b> {{ total_rows }}</span>
+  <span><b>Elapsed:</b> {{ elapsed }}s</span>
+</div>
+
+<a class="btn" href="/download/{{ cache_key }}.csv">Download full CSV ({{ total_rows }} rows)</a>
+<a class="btn gray" href="/">New query</a>
+
+{% if total_rows > preview_limit %}
+<div class="notice">Showing first {{ preview_limit }} of {{ total_rows }} rows. Download the CSV for the complete table.</div>
+{% endif %}
+
+<div class="filter">
+  <input id="filter" placeholder="Filter rows (any column)…">
+</div>
+<div class="wrap">
+<table id="result">
+  <thead><tr>{% for c in columns %}<th>{{ c }}</th>{% endfor %}</tr></thead>
+  <tbody>
+    {% for row in rows %}
+    <tr>
+      {% for cell in row %}
+        {% set col_name = columns[loop.index0] %}
+        {% set wrap_cols = ['Nucleotide Edits (global)', 'Guide Edits', 'Nucleotide Edits',
+                            'Amino Acid Edits', 'Mutation Category', 'Note'] %}
+        {% if col_name in wrap_cols %}
+          <td class="wrap-cell">{{ cell }}</td>
+        {% else %}
+          <td>{{ cell }}</td>
+        {% endif %}
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+</div>
+
+<script>
+  const input = document.getElementById('filter');
+  input.addEventListener('input', () => {
+    const q = input.value.toLowerCase();
+    const rows = document.querySelectorAll('#result tbody tr');
+    rows.forEach(r => {
+      r.style.display = r.innerText.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+</script>
+
+</body>
+</html>

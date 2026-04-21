@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Spectra — Base editor guide designer with full partial-edit enumeration</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, sans-serif;
+         max-width: 760px; margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.5; }
+  h1 { margin-bottom: 0.2em; }
+  .sub { color: #666; margin-top: 0; }
+  form { background: #fafafa; border: 1px solid #e2e2e2; padding: 1.2em; border-radius: 8px; }
+  label { display: block; font-weight: 600; margin-top: 0.8em; }
+  input[type=text], input[type=number], select {
+      padding: 0.45em 0.6em; border: 1px solid #bbb; border-radius: 4px;
+      font-size: 1em; width: 100%; box-sizing: border-box; }
+  .row { display: flex; gap: 0.6em; }
+  .row > div { flex: 1; }
+  button { background: #2d7; color: white; border: 0; padding: 0.7em 1.4em;
+           font-size: 1em; border-radius: 4px; margin-top: 1.2em; cursor: pointer; }
+  button:hover { background: #1c6; }
+  .err { background: #fee; color: #822; padding: 0.7em 1em; border-left: 4px solid #c33;
+         margin-bottom: 1em; border-radius: 4px; }
+  .note { font-size: 0.85em; color: #666; margin-top: 0.3em; }
+  details { margin-top: 1.2em; }
+  code { background: #eee; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.95em; }
+</style>
+</head>
+<body>
+<h1>Spectra</h1>
+<p class="sub">Base editor guide designer that enumerates <b>all</b> partial edit combinations in the window (not just the full-edit outcome).</p>
+
+{% if error %}<div class="err">{{ error }}</div>{% endif %}
+
+<form method="post" action="/generate">
+  <label>Ensembl Transcript ID (ENST)</label>
+  <input type="text" name="ensembl_id" placeholder="ENST00000349945.7" required>
+  <div class="note">Must be a transcript ID (ENST...). Gene IDs (ENSG...) are not supported.</div>
+
+  <div class="row">
+    <div>
+      <label>Editor</label>
+      <select name="editor">
+        <option value="ABE">ABE (A&rarr;G)</option>
+        <option value="CBE">CBE (C&rarr;T)</option>
+      </select>
+    </div>
+    <div>
+      <label>PAM</label>
+      <select name="pam">
+        <option value="NGG">NGG (SpCas9)</option>
+        <option value="NGN">NGN (SpCas9-NG / SpG)</option>
+      </select>
+    </div>
+  </div>
+
+  <label>Edit window (protospacer positions, 1-based; position 1 is PAM-distal)</label>
+  <div class="row">
+    <div>
+      <input type="number" name="window_start" min="1" max="20" value="3" required>
+    </div>
+    <div style="flex: 0 0 auto; align-self: center;">to</div>
+    <div>
+      <input type="number" name="window_end" min="1" max="20" value="10" required>
+    </div>
+  </div>
+  <div class="note">Beagle default is 3..10. ABE8e often uses 4..8; narrower windows for more specific editors.</div>
+
+  <label>Intron flank (nt into each intron at exon junctions)</label>
+  <input type="number" name="intron_flank" min="0" max="500" value="20">
+  <div class="note">Default 20 &mdash; matches Beagle's behavior of covering exons plus ~20 nt into
+  each flanking intron (to capture splice-site edits). Set to 0 for exons only.
+  Setting this very large (e.g. 100000) scans whole introns &mdash; expect 50k+ guides on long genes.</div>
+
+  <label>Max edits per outcome (optional)</label>
+  <input type="number" name="max_edits" min="1" max="20" placeholder="leave blank = all combinations">
+  <div class="note">A guide with 8 editable bases has 255 partial outcomes. Cap at e.g. 3 to avoid combinatorial blowup.</div>
+
+  <label>Flanking sequence fetched from Ensembl (bp around transcript)</label>
+  <input type="number" name="flank" min="0" max="500" value="50">
+  <div class="note">How much sequence to fetch outside the transcript boundaries. Does not affect
+  which guides are kept &mdash; that's controlled by "Intron flank" above.</div>
+
+  <button type="submit">Generate guides</button>
+</form>
+
+<details>
+  <summary>What does this report?</summary>
+  <p>Beagle reports one row per guide, assuming all editable bases in the window are edited simultaneously.
+     Spectra reports one row per <b>partial edit combination</b>, so a guide with 3 A's in the window gives 7 outcomes
+     (A, B, C, AB, AC, BC, ABC), each with its own HGVS nucleotide and amino-acid consequence.</p>
+  <p>Columns 1-24 match Beagle's output format. Three columns are added at the end:
+     <code>Edit Combination</code>, <code>Num Edits in Combination</code>, <code>Total Combinations for Guide</code>.</p>
+  <p><b>What Spectra does NOT do</b>: probability weighting. Partial outcomes are not ranked by predicted frequency.
+     Integrate BE-Hive (<code>maxwshen/be_predict_bystander</code>) if you want that.</p>
+</details>
+
+</body>
+</html>
