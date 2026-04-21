@@ -289,8 +289,10 @@ def generate_rows(
             aa_outcomes = summary.get("combined_aa_changes", summary.get("aa_edits", []))
             cats = summary.get("categories", [])
 
+            has_aa_outcome = False
             for i, aa_str in enumerate(aa_outcomes):
                 if aa_str and aa_str not in ("(NC)", "(?)"):
+                    has_aa_outcome = True
                     cat = cats[i] if i < len(cats) else ""
                     detail = "; ".join(detail_parts + [aa_str])
 
@@ -308,6 +310,17 @@ def generate_rows(
                         # Append new detail if not already present
                         if detail not in unique_aas[aa_str]["details"]:
                             unique_aas[aa_str]["details"] += " | " + detail
+
+            # If no AA outcome but we have splice-site/intron edits, record those
+            if not has_aa_outcome and detail_parts:
+                detail = "; ".join(detail_parts)
+                key = "(Non-coding edit)"
+                cat = summary.get("categories", [""])[0] if summary.get("categories") else ""
+                if key not in unique_aas:
+                    unique_aas[key] = {"cat": cat, "details": detail}
+                else:
+                    if detail not in unique_aas[key]["details"]:
+                        unique_aas[key]["details"] += " | " + detail
 
         if "CDS" in all_domains:
             target_domain = "CDS"
