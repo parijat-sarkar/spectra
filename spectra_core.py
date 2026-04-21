@@ -59,7 +59,6 @@ COLUMNS = [
     "Amino Acid Edits",
     "Mutation Category",
     "Constraint Violations",
-    "Note",
 ]
 
 
@@ -240,14 +239,15 @@ def generate_rows(
             continue
 
         # Collect all unique AA outcomes across all combos
-        # Structure: aa_change -> {"cat": str, "details": str}
-        # where details = "Splice-donor:+2; Intron:+6" etc.
+        # Structure: aa_change -> {"cat": str, "nuc_global": str, "guide_edits": str, "nuc_hgvs": str}
         unique_aas: dict[str, dict] = {}
         all_domains: set[str] = set()
 
         for combo in combos:
             # Build list of edits for this combo (all positions in combo)
             edits = []
+            edit_info = []  # Track (protospacer_pos, g_coord, ref, alt) for each edit
+
             for p in combo:
                 g_coord = protospacer_pos_to_plus_coord(
                     g["start_global"], g["orientation"], p, protospacer_len=20
@@ -260,32 +260,33 @@ def generate_rows(
                     _C = {"A":"T","T":"A","C":"G","G":"C","N":"N"}
                     alt_plus = _C[spec["product_base"]]
                 edits.append((g_coord, ref_plus, alt_plus))
+                edit_info.append((p, g_coord, ref_plus, alt_plus))
 
             # Annotate all edits in this combo simultaneously (codon-aware)
             per_edit, summary = annotate_edits(idx, edits, cds_seq=cds_seq)
 
-            # Build domain + position detail string for this combo
-            # Format: "Splice-donor:+2; Intron:+6; Arg294Arg"
-            detail_parts = []
-            for e in per_edit:
-                all_domains.add(e.domain)
-                # Format: domain[:position]
-                if e.domain == "CDS":
-                    detail_parts.append(f"CDS")
-                elif e.is_splice_donor and e.is_splice_acceptor:
-                    detail_parts.append(f"Splice-site:{e.c_coord}")
-                elif e.is_splice_donor:
-                    detail_parts.append(f"Splice-donor:{e.c_coord}")
-                elif e.is_splice_acceptor:
-                    detail_parts.append(f"Splice-acceptor:{e.c_coord}")
-                elif e.domain == "Intron":
-                    detail_parts.append(f"Intron:{e.c_coord}")
-                elif e.domain in ("UTR5", "UTR3"):
-                    detail_parts.append(f"{e.domain}:{e.c_coord}")
-                else:
-                    detail_parts.append(e.domain)
+            # Build column values for this combo
+            nuc_global_parts = []
+            guide_edit_parts = []
+            nuc_hgvs_parts = []
 
-            # Add AA changes
+            for i, (p, g_coord, ref, alt) in enumerate(edit_info):
+                if i < len(per_edit):
+                    e = per_edit[i]
+                    all_domains.add(e.domain)
+
+                    # Nucleotide Edits (global): genomic coordinates like 23532211T>C
+                    nuc_global_parts.append(f"{g_coord}{ref}>{alt}")
+
+                    # Guide Edits: which base in guide like A_5, C_7
+                    guide_edit_parts.append(f"{ref}_{p}")
+
+                    # Nucleotide Edits (HGVS): transcript coordinates like 3828A>G
+                    # Use the c_coord but extract just the position part
+                    c_pos = e.c_coord.split(':')[-1] if ':' in e.c_coord else e.c_coord
+                    nuc_hgvs_parts.append(f"{c_pos}{ref}>{alt}")
+
+            # Get AA outcomes
             aa_outcomes = summary.get("combined_aa_changes", summary.get("aa_edits", []))
             cats = summary.get("categories", [])
 
@@ -294,33 +295,38 @@ def generate_rows(
                 if aa_str and aa_str not in ("(NC)", "(?)"):
                     has_aa_outcome = True
                     cat = cats[i] if i < len(cats) else ""
-                    detail = "; ".join(detail_parts + [aa_str])
 
-                    if aa_str not in unique_aas:
-                        unique_aas[aa_str] = {"cat": cat, "details": detail}
+                    # Remove "p." prefix if present
+                    aa_clean = aa_str.replace("p.", "") if aa_str else ""
+
+                    if aa_clean not in unique_aas:
+                        unique_aas[aa_clean] = {
+                            "cat": cat,
+                            "nuc_global": "; ".join(nuc_global_parts),
+                            "guide_edits": ", ".join(guide_edit_parts),
+                            "nuc_hgvs": "; ".join(nuc_hgvs_parts)
+                        }
                     else:
-                        # Keep worst category for this AA, merge details
-                        existing_cat = unique_aas[aa_str]["cat"]
+                        # Keep worst category for this AA, merge edit lists
+                        existing_cat = unique_aas[aa_clean]["cat"]
                         for severity_cat in _CATEGORY_SEVERITY:
                             if severity_cat == existing_cat:
                                 break
                             if severity_cat == cat:
-                                unique_aas[aa_str]["cat"] = cat
+                                unique_aas[aa_clean]["cat"] = cat
                                 break
-                        # Append new detail if not already present
-                        if detail not in unique_aas[aa_str]["details"]:
-                            unique_aas[aa_str]["details"] += " | " + detail
 
-            # If no AA outcome but we have splice-site/intron edits, record those
-            if not has_aa_outcome and detail_parts:
-                detail = "; ".join(detail_parts)
+            # If no AA outcome but we have edits, record them
+            if not has_aa_outcome and nuc_global_parts:
                 key = "(Non-coding edit)"
                 cat = summary.get("categories", [""])[0] if summary.get("categories") else ""
                 if key not in unique_aas:
-                    unique_aas[key] = {"cat": cat, "details": detail}
-                else:
-                    if detail not in unique_aas[key]["details"]:
-                        unique_aas[key]["details"] += " | " + detail
+                    unique_aas[key] = {
+                        "cat": cat,
+                        "nuc_global": "; ".join(nuc_global_parts),
+                        "guide_edits": ", ".join(guide_edit_parts),
+                        "nuc_hgvs": "; ".join(nuc_hgvs_parts)
+                    }
 
         if "CDS" in all_domains:
             target_domain = "CDS"
@@ -334,7 +340,9 @@ def generate_rows(
         # Format output
         aa_list = sorted(unique_aas.keys())
         cat_list = [unique_aas[aa]["cat"] for aa in aa_list]
-        detail_list = [unique_aas[aa]["details"] for aa in aa_list]
+        nuc_global_list = [unique_aas[aa].get("nuc_global", "") for aa in aa_list]
+        guide_edits_list = [unique_aas[aa].get("guide_edits", "") for aa in aa_list]
+        nuc_hgvs_list = [unique_aas[aa].get("nuc_hgvs", "") for aa in aa_list]
         worst_cat = _worst_category(cat_list)
 
         row = [
@@ -355,13 +363,12 @@ def generate_rows(
             g["pam"],
             str(g["start_global"]),
             g["orientation"],
-            "",  # Nucleotide Edits (global) - TODO
-            "",  # Guide Edits - TODO
-            "",  # Nucleotide Edits (HGVS) - TODO
+            "; ".join(nuc_global_list),  # Nucleotide Edits (global) - genomic coords
+            "; ".join(guide_edits_list),  # Guide Edits - which bases in guide
+            "; ".join(nuc_hgvs_list),  # Nucleotide Edits (HGVS) - transcript coords
             "; ".join(aa_list),  # Amino Acid Edits (all unique AAs from all combos)
             "; ".join(cat_list),  # Mutation Categories (per AA)
             _constraint_violations(g["sequence"]),
-            "; ".join(detail_list),  # Note (shows domain + position + AA)
         ]
         yield row
 
