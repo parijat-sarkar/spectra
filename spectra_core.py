@@ -283,7 +283,7 @@ def generate_rows(
 
                     # Nucleotide Edits (HGVS): transcript coordinates like 3828A>G
                     # Use the c_coord but extract just the position part
-                    c_pos = e.c_coord.split(':')[-1] if ':' in e.c_coord else e.c_coord
+                    c_pos = e.c_coord.split(':')[-1] if (e.c_coord and ':' in e.c_coord) else (e.c_coord or "?")
                     nuc_hgvs_parts.append(f"{c_pos}{ref}>{alt}")
 
             # Get AA outcomes
