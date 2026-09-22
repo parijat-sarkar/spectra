@@ -8,16 +8,30 @@ lifetime of the process.
 
 from __future__ import annotations
 
+import os
 import time
 from functools import lru_cache
 from typing import Any
 
 import requests
 
-ENSEMBL_REST = "https://rest.ensembl.org"
-TIMEOUT = 60
-MAX_RETRIES = 3
-RETRY_DELAY = 2  # seconds
+# Override with ENSEMBL_REST_URL to pin a release (e.g. https://e111.rest.ensembl.org)
+# or to switch to a different mirror when the main endpoint is unhealthy.
+ENSEMBL_REST = os.environ.get("ENSEMBL_REST_URL", "https://rest.ensembl.org").rstrip("/")
+
+# Per-request socket timeout. Short on purpose: a hung Ensembl connection used
+# to block a worker for a full minute at a time.
+TIMEOUT = float(os.environ.get("ENSEMBL_TIMEOUT", 20))
+MAX_RETRIES = int(os.environ.get("ENSEMBL_MAX_RETRIES", 5))
+RETRY_DELAY = 1.0  # seconds, doubled each attempt
+MAX_RETRY_DELAY = 8.0
+
+# Hard ceiling on the time one logical fetch may spend retrying. This must stay
+# comfortably below gunicorn's --timeout so we raise a catchable EnsemblError
+# (which the app renders as a readable message) instead of letting the arbiter
+# SIGABRT the worker -- SystemExit is a BaseException and escapes the app's
+# `except Exception`, which is what produced bare 500s with no error page.
+DEADLINE = float(os.environ.get("ENSEMBL_DEADLINE", 90))
 
 
 class EnsemblError(RuntimeError):
@@ -25,27 +39,43 @@ class EnsemblError(RuntimeError):
 
 
 def _get(path: str, params: dict | None = None, accept: str = "application/json") -> Any:
-    """HTTP GET with basic retry on 429 / 5xx."""
+    """HTTP GET with exponential-backoff retry on 429 / 5xx, bounded by DEADLINE."""
     url = f"{ENSEMBL_REST}{path}"
     headers = {"Accept": accept}
     last_err = None
+    started = time.monotonic()
+    delay = RETRY_DELAY
+
     for attempt in range(MAX_RETRIES):
+        remaining = DEADLINE - (time.monotonic() - started)
+        if remaining <= 0:
+            break
         try:
-            r = requests.get(url, params=params or {}, headers=headers, timeout=TIMEOUT)
+            r = requests.get(url, params=params or {}, headers=headers,
+                             timeout=min(TIMEOUT, remaining))
             if r.status_code == 429 or r.status_code >= 500:
-                retry_after = float(r.headers.get("Retry-After", RETRY_DELAY))
-                time.sleep(retry_after)
                 last_err = EnsemblError(f"HTTP {r.status_code} for {url}")
-                continue
-            if not r.ok:
+                wait = float(r.headers.get("Retry-After", delay))
+            elif not r.ok:
+                # 4xx other than 429: a bad ID won't fix itself, fail immediately.
                 raise EnsemblError(f"HTTP {r.status_code} for {url}: {r.text[:200]}")
-            if accept == "application/json":
-                return r.json()
-            return r.text
+            else:
+                return r.json() if accept == "application/json" else r.text
         except requests.RequestException as e:
             last_err = e
-            time.sleep(RETRY_DELAY)
-    raise EnsemblError(f"Failed after {MAX_RETRIES} retries: {last_err}")
+            wait = delay
+
+        if attempt < MAX_RETRIES - 1:
+            time.sleep(min(wait, MAX_RETRY_DELAY, max(0.0, DEADLINE - (time.monotonic() - started))))
+            delay = min(delay * 2, MAX_RETRY_DELAY)
+
+    waited = time.monotonic() - started
+    raise EnsemblError(
+        f"Ensembl did not respond successfully after {MAX_RETRIES} attempts "
+        f"over {waited:.0f}s ({last_err}). The REST service is likely having "
+        f"a wobble -- wait a minute and retry, or set ENSEMBL_REST_URL to a "
+        f"release-pinned mirror such as https://e111.rest.ensembl.org"
+    )
 
 
 @lru_cache(maxsize=256)
