@@ -24,7 +24,7 @@ For a guide with 3 editable A's at protospacer positions 3, 7, 10 (7 combos):
 Edit Combination          : A_3 | A_7 | A_10 | A_3 + A_7 | A_3 + A_10 | A_7 + A_10 | A_3 + A_7 + A_10
 Nucleotide Edits (global) : 5A>G | 9A>G | 12A>G | 5A>G, 9A>G | 5A>G, 12A>G | 9A>G, 12A>G | 5A>G, 9A>G, 12A>G
 Mutation Category         : Missense | Missense | Silent  | Missense    | Missense     | Missense     | Missense
-Num Edits in Combination  : 1, 1, 1, 2, 2, 2, 3
+Num Edits in Combination  : 1 | 1 | 1 | 2 | 2 | 2 | 3
 Total Combinations        : 7
 Worst Mutation Category   : Missense
 Unique Mutation Categories: Missense, Silent
@@ -52,8 +52,15 @@ Unique Mutation Categories: Missense, Silent
 
 ## Columns
 
-The output table has the 24 columns Beagle emits, in the same order, **plus**
-three extension columns at the end:
+The output table has the 23 columns Beagle emits, in the same order, **plus**
+five extension columns at the end (28 total).
+
+**Alignment guarantee:** the seven per-outcome columns — Nucleotide Edits
+(global), Guide Edits, Nucleotide Edits, Amino Acid Edits, Mutation Category,
+Edit Combination, Num Edits in Combination — always split on ` | ` into the
+same number of fields, in the same order. Split any of them and zip them
+together and the *n*-th field of each describes the same outcome. Edits
+*within* one outcome are joined with `, `.
 
 1. Input, 2. CRISPR Enzyme, 3. Edit Type, 4. Edit Window,
 5. Target Taxon, 6. Target Assembly, 7. Target Genome Sequence,
@@ -63,15 +70,14 @@ three extension columns at the end:
 16. sgRNA Sequence Start Pos. (global), 17. sgRNA Orientation,
 18. Nucleotide Edits (global), 19. Guide Edits, 20. Nucleotide Edits,
 21. Amino Acid Edits, 22. Mutation Category, 23. Constraint Violations,
-24. Note,
 
-**New:** 25. Edit Combination, 26. Num Edits in Combination,
-27. Total Combinations for Guide,
-28. Worst Mutation Category (most severe outcome across combinations —
+**New:** 24. Edit Combination, 25. Num Edits in Combination,
+26. Total Combinations for Guide,
+27. Worst Mutation Category (most severe outcome across combinations —
     sortable; severity ranks Nonsense > Start-loss > Splice-donor >
     Splice-acceptor > Missense > Silent > UTR > Intron > Outside),
-29. Unique Mutation Categories (deduplicated atomic categories across
-    combinations, e.g. `Missense, Silent`).
+28. Unique Mutation Categories (deduplicated categories across
+    combinations, most severe first, e.g. `Missense, Silent`).
 
 ## Setup
 
@@ -134,8 +140,16 @@ This checks:
 7. **Intron flank default is 20 nt.** If you're hunting branch-point
    mutations, intronic enhancer edits, or anything deeper than 20 nt into
    an intron, raise "Intron flank". If you want exon-only, set it to 0.
-7. **Off-target scoring is not performed.** Use CRISPick, Cas-OFFinder,
+8. **Off-target scoring is not performed.** Use CRISPick, Cas-OFFinder,
    or CHOPCHOP in addition to this tool.
+9. **Met1 changes are reported as `Start-loss`,** not `Missense`. Broad's
+   Beagle reports these as `Missense`; if you are diffing the two exports,
+   expect that one systematic difference.
+10. **Outcomes are deduplicated by consequence.** If two different edit
+   combinations in the same codon produce the same amino acid change, only
+   the simplest (fewest edits) is listed. A `CCA` proline edited at both
+   C's gives `TTA` = Leu, which is already covered by the single-edit
+   `Pro→Leu` entry, so no separate row appears for it.
 
 ## Architecture
 
@@ -144,11 +158,12 @@ ensembl_client.py   -- Ensembl REST wrapper (lookup, sequence fetch)
 guide_finder.py     -- PAM scanning, protospacer + context extraction
 edit_enumerator.py  -- 2^N partial edit subset enumeration
 annotator.py        -- Transcript index + HGVS + AA translation
-beagle_core.py      -- Orchestration, Beagle column assembly
+spectra_core.py     -- Orchestration, Beagle column assembly
 app.py              -- Flask routes (form + results + CSV download + JSON API)
 templates/          -- HTML templates for index + results
 validate_vs_beagle.py -- Cross-check output against a Beagle export
 test_synthetic.py   -- End-to-end test on a synthetic transcript
+test_alignment.py   -- Regression tests for per-outcome column alignment
 ```
 
 ## JSON API

@@ -35,6 +35,11 @@ ENZYME_LABEL = {
     "NG": "SpyoCas9NG",
 }
 
+# Separator between outcomes within a cell. Edits *within* one outcome are
+# joined with ", ". Splitting a cell on SEP and zipping the edit columns with
+# Amino Acid Edits / Mutation Category is guaranteed to line up.
+SEP = " | "
+
 COLUMNS = [
     "Input",
     "CRISPR Enzyme",
@@ -59,7 +64,24 @@ COLUMNS = [
     "Amino Acid Edits",
     "Mutation Category",
     "Constraint Violations",
+    # --- Beagle+ extension columns ---
+    "Edit Combination",
+    "Num Edits in Combination",
+    "Total Combinations for Guide",
+    "Worst Mutation Category",
+    "Unique Mutation Categories",
 ]
+
+
+def _hgvs(e, info) -> str:
+    """Transcript-sense HGVS nucleotide change for one annotated edit.
+
+    Uses the transcript-sense ref/alt (already complemented for - strand
+    transcripts by the annotator) -- the old code used the + strand bases here,
+    which mislabelled every edit on a - strand gene.
+    """
+    c_pos = e.c_coord.split(":")[-1] if (e.c_coord and ":" in e.c_coord) else (e.c_coord or "?")
+    return f"{c_pos}{e.ref_tx}>{e.alt_tx}"
 
 
 # Severity order for "Worst Mutation Category" (highest first wins).
@@ -238,15 +260,57 @@ def generate_rows(
         if not combos:
             continue
 
-        # Collect all unique AA outcomes across all combos
-        # Structure: aa_change -> {"cat": str, "nuc_global": str, "guide_edits": str, "nuc_hgvs": str}
-        unique_aas: dict[str, dict] = {}
+        # Collect unique outcomes across all combos.
+        #
+        # An "outcome" is one consequence (one affected codon, or one non-coding
+        # edit), NOT one combo. A 2-edit combo spanning two codons therefore
+        # contributes two outcomes, each carrying only its own edits. This keeps
+        # every edit column strictly parallel to Amino Acid Edits / Mutation
+        # Category, which is what makes the row machine-readable.
+        #
+        # key -> {"cat", "aa", "nuc_global", "guide_edits", "nuc_hgvs",
+        #         "combination", "n_edits", "sort_key"}
+        outcomes: dict[str, dict] = {}
         all_domains: set[str] = set()
+
+        def _record(key, aa, cat, idxs, edit_info, per_edit):
+            """Register one outcome, carrying only the edits that produced it."""
+            idxs = sorted(idxs)
+            positions = [edit_info[i][0] for i in idxs]
+            entry = {
+                "aa": aa,
+                "cat": cat,
+                "nuc_global": ", ".join(f"{edit_info[i][1]}{edit_info[i][2]}>{edit_info[i][3]}"
+                                        for i in idxs),
+                # Guide Edits describe the base on the PROTOSPACER (always the
+                # editor's target base: C for CBE, A for ABE). The old code used
+                # the + strand reference base here, so antisense guides reported
+                # "G_4"/"T_4" for what is a C/A on the guide.
+                "guide_edits": ", ".join(f"{edit_info[i][4]}_{edit_info[i][0]}" for i in idxs),
+                "nuc_hgvs": ", ".join(_hgvs(per_edit[i], edit_info[i]) for i in idxs),
+                "combination": " + ".join(f"{edit_info[i][4]}_{edit_info[i][0]}" for i in idxs),
+                "n_edits": len(idxs),
+                # Singles first (ascending protospacer position), then pairs, then
+                # triples -- the order the README documents.
+                "sort_key": (len(idxs), tuple(positions)),
+            }
+            prev = outcomes.get(key)
+            if prev is None:
+                outcomes[key] = entry
+                return
+            # Same consequence reachable from several combos: keep the simplest
+            # (fewest edits), and the most severe category if they disagree.
+            if entry["sort_key"] < prev["sort_key"]:
+                entry["cat"] = _worst_category([prev["cat"], entry["cat"]])
+                outcomes[key] = entry
+            else:
+                prev["cat"] = _worst_category([prev["cat"], entry["cat"]])
 
         for combo in combos:
             # Build list of edits for this combo (all positions in combo)
             edits = []
-            edit_info = []  # Track (protospacer_pos, g_coord, ref, alt) for each edit
+            # (protospacer_pos, g_coord, ref_plus, alt_plus, protospacer_base)
+            edit_info = []
 
             for p in combo:
                 g_coord = protospacer_pos_to_plus_coord(
@@ -260,73 +324,39 @@ def generate_rows(
                     _C = {"A":"T","T":"A","C":"G","G":"C","N":"N"}
                     alt_plus = _C[spec["product_base"]]
                 edits.append((g_coord, ref_plus, alt_plus))
-                edit_info.append((p, g_coord, ref_plus, alt_plus))
+                edit_info.append((p, g_coord, ref_plus, alt_plus, spec["target_base"]))
 
             # Annotate all edits in this combo simultaneously (codon-aware)
             per_edit, summary = annotate_edits(idx, edits, cds_seq=cds_seq)
 
-            # Build column values for this combo
-            nuc_global_parts = []
-            guide_edit_parts = []
-            nuc_hgvs_parts = []
+            for e in per_edit:
+                all_domains.add(e.domain)
 
-            for i, (p, g_coord, ref, alt) in enumerate(edit_info):
-                if i < len(per_edit):
-                    e = per_edit[i]
-                    all_domains.add(e.domain)
+            # --- coding outcomes: one per affected codon ---------------------
+            # combined_aa_changes / combined_categories / combined_edit_indices
+            # are parallel (per codon). 'categories' is per EDIT and must never
+            # be zipped against them -- that was the old misalignment bug.
+            aa_changes = summary.get("combined_aa_changes", [])
+            aa_cats = summary.get("combined_categories", [])
+            aa_idxs = summary.get("combined_edit_indices", [])
 
-                    # Nucleotide Edits (global): genomic coordinates like 23532211T>C
-                    nuc_global_parts.append(f"{g_coord}{ref}>{alt}")
+            coding_idxs: set[int] = set()
+            for aa_str, cat, idxs in zip(aa_changes, aa_cats, aa_idxs):
+                if not aa_str or aa_str in ("(NC)", "(?)"):
+                    continue
+                coding_idxs.update(idxs)
+                _record(aa_str.replace("p.", ""), aa_str.replace("p.", ""),
+                        cat, idxs, edit_info, per_edit)
 
-                    # Guide Edits: which base in guide like A_5, C_7
-                    guide_edit_parts.append(f"{ref}_{p}")
-
-                    # Nucleotide Edits (HGVS): transcript coordinates like 3828A>G
-                    # Use the c_coord but extract just the position part
-                    c_pos = e.c_coord.split(':')[-1] if (e.c_coord and ':' in e.c_coord) else (e.c_coord or "?")
-                    nuc_hgvs_parts.append(f"{c_pos}{ref}>{alt}")
-
-            # Get AA outcomes
-            aa_outcomes = summary.get("combined_aa_changes", summary.get("aa_edits", []))
-            cats = summary.get("categories", [])
-
-            has_aa_outcome = False
-            for i, aa_str in enumerate(aa_outcomes):
-                if aa_str and aa_str not in ("(NC)", "(?)"):
-                    has_aa_outcome = True
-                    cat = cats[i] if i < len(cats) else ""
-
-                    # Remove "p." prefix if present
-                    aa_clean = aa_str.replace("p.", "") if aa_str else ""
-
-                    if aa_clean not in unique_aas:
-                        unique_aas[aa_clean] = {
-                            "cat": cat,
-                            "nuc_global": "; ".join(nuc_global_parts),
-                            "guide_edits": ", ".join(guide_edit_parts),
-                            "nuc_hgvs": "; ".join(nuc_hgvs_parts)
-                        }
-                    else:
-                        # Keep worst category for this AA, merge edit lists
-                        existing_cat = unique_aas[aa_clean]["cat"]
-                        for severity_cat in _CATEGORY_SEVERITY:
-                            if severity_cat == existing_cat:
-                                break
-                            if severity_cat == cat:
-                                unique_aas[aa_clean]["cat"] = cat
-                                break
-
-            # If no AA outcome but we have edits, record them
-            if not has_aa_outcome and nuc_global_parts:
-                key = "(Non-coding edit)"
-                cat = summary.get("categories", [""])[0] if summary.get("categories") else ""
-                if key not in unique_aas:
-                    unique_aas[key] = {
-                        "cat": cat,
-                        "nuc_global": "; ".join(nuc_global_parts),
-                        "guide_edits": ", ".join(guide_edit_parts),
-                        "nuc_hgvs": "; ".join(nuc_hgvs_parts)
-                    }
+            # --- non-coding outcomes: one per edit ---------------------------
+            # Recorded even when the same combo also has a coding outcome, and
+            # keyed individually so distinct intronic/UTR edits don't collapse
+            # into a single "(Non-coding edit)" bucket.
+            for i, e in enumerate(per_edit):
+                if i in coding_idxs or e.domain == "CDS":
+                    continue
+                hgvs = _hgvs(e, edit_info[i])
+                _record(hgvs, "(Non-coding edit)", e.category, [i], edit_info, per_edit)
 
         if "CDS" in all_domains:
             target_domain = "CDS"
@@ -337,13 +367,21 @@ def generate_rows(
         else:
             target_domain = "Outside"
 
-        # Format output
-        aa_list = sorted(unique_aas.keys())
-        cat_list = [unique_aas[aa]["cat"] for aa in aa_list]
-        nuc_global_list = [unique_aas[aa].get("nuc_global", "") for aa in aa_list]
-        guide_edits_list = [unique_aas[aa].get("guide_edits", "") for aa in aa_list]
-        nuc_hgvs_list = [unique_aas[aa].get("nuc_hgvs", "") for aa in aa_list]
+        # Format output. Outcomes are ordered singles-then-pairs-then-triples,
+        # ascending protospacer position -- so every "|"-separated column reads
+        # in the same order and can be split and zipped safely.
+        ordered = sorted(outcomes.values(), key=lambda o: o["sort_key"])
+        aa_list = [o["aa"] for o in ordered]
+        cat_list = [o["cat"] for o in ordered]
+        nuc_global_list = [o["nuc_global"] for o in ordered]
+        guide_edits_list = [o["guide_edits"] for o in ordered]
+        nuc_hgvs_list = [o["nuc_hgvs"] for o in ordered]
+        combination_list = [o["combination"] for o in ordered]
+        n_edits_list = [str(o["n_edits"]) for o in ordered]
         worst_cat = _worst_category(cat_list)
+        unique_cats = sorted(set(_flatten_categories(cat_list)),
+                             key=lambda c: _CATEGORY_SEVERITY.index(c)
+                             if c in _CATEGORY_SEVERITY else 99)
 
         row = [
             input_tag,
@@ -363,12 +401,17 @@ def generate_rows(
             g["pam"],
             str(g["start_global"]),
             g["orientation"],
-            "; ".join(nuc_global_list),  # Nucleotide Edits (global) - genomic coords
-            "; ".join(guide_edits_list),  # Guide Edits - which bases in guide
-            "; ".join(nuc_hgvs_list),  # Nucleotide Edits (HGVS) - transcript coords
-            "; ".join(aa_list),  # Amino Acid Edits (all unique AAs from all combos)
-            "; ".join(cat_list),  # Mutation Categories (per AA)
+            SEP.join(nuc_global_list),   # Nucleotide Edits (global) - genomic coords
+            SEP.join(guide_edits_list),  # Guide Edits - which bases in guide
+            SEP.join(nuc_hgvs_list),     # Nucleotide Edits (HGVS) - transcript coords
+            SEP.join(aa_list),           # Amino Acid Edits - one per outcome
+            SEP.join(cat_list),          # Mutation Category - one per outcome, aligned
             _constraint_violations(g["sequence"]),
+            SEP.join(combination_list),  # Edit Combination
+            SEP.join(n_edits_list),      # Num Edits in Combination
+            str(len(ordered)),           # Total Combinations for Guide
+            worst_cat,                   # Worst Mutation Category
+            ", ".join(unique_cats),      # Unique Mutation Categories
         ]
         yield row
 

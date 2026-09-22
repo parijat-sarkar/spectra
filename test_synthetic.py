@@ -14,7 +14,7 @@ We verify:
 """
 
 from annotator import build_transcript_index, annotate_edits, build_cds_sequence
-from beagle_core import generate_rows, COLUMNS
+from spectra_core import generate_rows, COLUMNS
 
 
 def make_plus_transcript():

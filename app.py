@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import csv
 import io
+import os
 import time
 from threading import Lock
 
@@ -161,4 +162,8 @@ def api_generate():
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=False)
+    # Render (and most PaaS) inject $PORT and require binding to 0.0.0.0.
+    # Locally these default to the old 127.0.0.1:5000 behaviour.
+    port = int(os.environ.get("PORT", 5000))
+    host = os.environ.get("HOST", "0.0.0.0" if os.environ.get("PORT") else "127.0.0.1")
+    app.run(host=host, port=port, debug=False)
