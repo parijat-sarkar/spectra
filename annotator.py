@@ -356,8 +356,18 @@ def annotate_edits(
             'categories': list[str] (one per edit, in input order),
             'aa_edits': list[str]   (one per edit; same length as edits; '(NC)' for non-coding),
             'combined_aa_changes': list[str]  (one per distinct affected codon, combined),
+            'combined_categories': list[str]  (one per distinct affected codon, PARALLEL to
+                                               combined_aa_changes -- use this, not 'categories',
+                                               when iterating combined_aa_changes),
+            'combined_edit_indices': list[list[int]] (indices into `edits` that produced each
+                                               entry of combined_aa_changes),
             'mutation_category': str (comma-joined categories, Beagle-style),
         }
+
+    NOTE on the two axes: 'categories' and 'aa_edits' are indexed per EDIT, in the
+    caller's input order. 'combined_*' are indexed per affected CODON, in ascending
+    codon order. The two are different lengths and different orders whenever a guide
+    is antisense or two edits share a codon -- never zip one against the other.
     """
     per_edit: list[AnnotatedEdit] = []
     cds_changes: dict[int, dict] = {}   # codon_idx -> {'frame_to_alt': {frame: alt_tx}, 'ref_codon': str, ...}
@@ -406,6 +416,8 @@ def annotate_edits(
     # --- Combined codon translation for CDS edits ---
     aa_edits = ["(NC)"] * len(per_edit)
     combined_aa_changes: list[str] = []
+    combined_categories: list[str] = []
+    combined_edit_indices: list[list[int]] = []
 
     if cds_seq:
         # Group CDS edits by codon
@@ -432,7 +444,6 @@ def annotate_edits(
             alt_aa = CODON_TABLE.get(alt_codon_s, "?")
 
             aa_str = f"p.{AA_THREE.get(ref_aa, ref_aa)}{codon_idx}{AA_THREE.get(alt_aa, alt_aa)}"
-            combined_aa_changes.append(aa_str)
 
             if ref_aa == alt_aa:
                 cat = "Silent"
@@ -444,6 +455,12 @@ def annotate_edits(
                 cat = "Start-loss"
             else:
                 cat = "Missense"
+
+            # Keep these three lists strictly parallel -- callers index them together.
+            combined_aa_changes.append(aa_str)
+            combined_categories.append(cat)
+            combined_edit_indices.append(list(edit_indices))
+
             for i in edit_indices:
                 per_edit[i].category = cat
                 aa_edits[i] = aa_str
@@ -455,6 +472,8 @@ def annotate_edits(
         "categories": categories,
         "aa_edits": aa_edits,
         "combined_aa_changes": combined_aa_changes,
+        "combined_categories": combined_categories,
+        "combined_edit_indices": combined_edit_indices,
         "mutation_category": mutation_category,
     }
 

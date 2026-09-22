@@ -30,7 +30,7 @@ except ImportError:
     print("Install openpyxl: pip install openpyxl")
     sys.exit(1)
 
-from beagle_core import generate_table, COLUMNS
+from spectra_core import generate_table, COLUMNS
 
 
 def load_beagle(xlsx_path: str) -> list[dict]:
